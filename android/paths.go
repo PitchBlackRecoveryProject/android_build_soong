@@ -1171,8 +1171,7 @@ func modulePartition(ctx ModuleInstallPathContext) string {
 	} else if ctx.InstallInTestcases() {
 		partition = "testcases"
 	} else if ctx.InstallInRecovery() {
-		// the layout of recovery partion is the same as that of system partition
-		partition = "recovery/root/system"
+		partition = "recovery/root"
 	} else if ctx.SocSpecific() {
 		partition = ctx.DeviceConfig().VendorPath()
 	} else if ctx.DeviceSpecific() {
