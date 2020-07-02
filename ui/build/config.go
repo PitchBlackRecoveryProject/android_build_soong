@@ -55,7 +55,6 @@ type configImpl struct {
 
 	brokenDupRules     bool
 	brokenPhonyTargets bool
-	brokenUsesNetwork  bool
 
 	pathReplaced bool
 }
@@ -627,14 +626,6 @@ func (c *configImpl) SetBuildBrokenPhonyTargets(val bool) {
 
 func (c *configImpl) BuildBrokenPhonyTargets() bool {
 	return c.brokenPhonyTargets
-}
-
-func (c *configImpl) SetBuildBrokenUsesNetwork(val bool) {
-	c.brokenUsesNetwork = val
-}
-
-func (c *configImpl) BuildBrokenUsesNetwork() bool {
-	return c.brokenUsesNetwork
 }
 
 func (c *configImpl) SetTargetDeviceDir(dir string) {
