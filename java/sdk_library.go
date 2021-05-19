@@ -900,9 +900,15 @@ func (c *commonToSdkLibraryAndImport) sdkComponentPropertiesForChildLibrary() in
 	return componentProps
 }
 
-// Check if this can be used as a shared library.
 func (c *commonToSdkLibraryAndImport) sharedLibrary() bool {
 	return proptools.BoolDefault(c.commonSdkLibraryProperties.Shared_library, true)
+}
+
+// Check if the stub libraries should be compiled for dex
+func (c *commonToSdkLibraryAndImport) stubLibrariesCompiledForDex() bool {
+	// Always compile the dex file files for the stub libraries if they will be used on the
+	// bootclasspath.
+	return !c.sharedLibrary()
 }
 
 // Properties related to the use of a module as an component of a java_sdk_library.
@@ -978,6 +984,9 @@ type SdkLibraryDependency interface {
 	// SdkApiStubDexJar returns the dex jar for the stubs. It is needed by the hiddenapi processing
 	// tool which processes dex files.
 	SdkApiStubDexJar(ctx android.BaseModuleContext, kind android.SdkKind) android.Path
+
+	// sharedLibrary returns true if this can be used as a shared library.
+	sharedLibrary() bool
 }
 
 type SdkLibrary struct {
@@ -1226,16 +1235,13 @@ func childModuleVisibility(childVisibility []string) []string {
 
 // Creates the implementation java library
 func (module *SdkLibrary) createImplLibrary(mctx android.DefaultableHookContext) {
-	moduleNamePtr := proptools.StringPtr(module.BaseModuleName())
-
 	visibility := childModuleVisibility(module.sdkLibraryProperties.Impl_library_visibility)
 
 	props := struct {
-		Name              *string
-		Visibility        []string
-		Instrument        bool
-		Libs              []string
-		ConfigurationName *string
+		Name       *string
+		Visibility []string
+		Instrument bool
+		Libs       []string
 	}{
 		Name:       proptools.StringPtr(module.implLibraryModuleName()),
 		Visibility: visibility,
@@ -1244,9 +1250,6 @@ func (module *SdkLibrary) createImplLibrary(mctx android.DefaultableHookContext)
 		// Set the impl_only libs. Note that the module's "Libs" get appended as well, via the
 		// addition of &module.properties below.
 		Libs: module.sdkLibraryProperties.Impl_only_libs,
-
-		// Make the created library behave as if it had the same name as this module.
-		ConfigurationName: moduleNamePtr,
 	}
 
 	properties := []interface{}{
@@ -1309,9 +1312,13 @@ func (module *SdkLibrary) createStubsLibrary(mctx android.DefaultableHookContext
 	// We compile the stubs for 1.8 in line with the main android.jar stubs, and potential
 	// interop with older developer tools that don't support 1.9.
 	props.Java_version = proptools.StringPtr("1.8")
-	if module.dexProperties.Compile_dex != nil {
-		props.Compile_dex = module.dexProperties.Compile_dex
+
+	// The imports need to be compiled to dex if the java_sdk_library requests it.
+	compileDex := module.dexProperties.Compile_dex
+	if module.stubLibrariesCompiledForDex() {
+		compileDex = proptools.BoolPtr(true)
 	}
+	props.Compile_dex = compileDex
 
 	// Dist the class jar artifact for sdk builds.
 	if !Bool(module.sdkLibraryProperties.No_dist) {
@@ -1969,7 +1976,11 @@ func (module *SdkLibraryImport) createJavaImportForStubs(mctx android.Defaultabl
 	props.Prefer = proptools.BoolPtr(module.prebuilt.Prefer())
 
 	// The imports need to be compiled to dex if the java_sdk_library_import requests it.
-	props.Compile_dex = module.properties.Compile_dex
+	compileDex := module.properties.Compile_dex
+	if module.stubLibrariesCompiledForDex() {
+		compileDex = proptools.BoolPtr(true)
+	}
+	props.Compile_dex = compileDex
 
 	mctx.CreateModule(ImportFactory, &props, module.sdkComponentPropertiesForChildLibrary())
 }
@@ -2110,8 +2121,7 @@ func (module *SdkLibraryImport) GenerateAndroidBuildActions(ctx android.ModuleCo
 			di := ctx.OtherModuleProvider(deapexerModule, android.DeapexerProvider).(android.DeapexerInfo)
 			if dexOutputPath := di.PrebuiltExportPath(module.BaseModuleName(), ".dexjar"); dexOutputPath != nil {
 				module.dexJarFile = dexOutputPath
-				module.initHiddenAPI(ctx, module.configurationName)
-				module.hiddenAPIExtractInformation(ctx, dexOutputPath, module.findScopePaths(apiScopePublic).stubsImplPath[0])
+				module.initHiddenAPI(ctx, dexOutputPath, module.findScopePaths(apiScopePublic).stubsImplPath[0], nil)
 			} else {
 				// This should never happen as a variant for a prebuilt_apex is only created if the
 				// prebuilt_apex has been configured to export the java library dex file.
@@ -2482,11 +2492,18 @@ func (s *sdkLibrarySdkMemberProperties) AddToPropertySet(ctx android.SdkMemberCo
 			}
 			scopeSet.AddProperty("jars", jars)
 
-			// Merge the stubs source jar into the snapshot zip so that when it is unpacked
-			// the source files are also unpacked.
-			snapshotRelativeDir := filepath.Join(scopeDir, ctx.Name()+"_stub_sources")
-			ctx.SnapshotBuilder().UnzipToSnapshot(properties.StubsSrcJar, snapshotRelativeDir)
-			scopeSet.AddProperty("stub_srcs", []string{snapshotRelativeDir})
+			if ctx.SdkModuleContext().Config().IsEnvTrue("SOONG_SDK_SNAPSHOT_USE_SRCJAR") {
+				// Copy the stubs source jar into the snapshot zip as is.
+				srcJarSnapshotPath := filepath.Join(scopeDir, ctx.Name()+".srcjar")
+				ctx.SnapshotBuilder().CopyToSnapshot(properties.StubsSrcJar, srcJarSnapshotPath)
+				scopeSet.AddProperty("stub_srcs", []string{srcJarSnapshotPath})
+			} else {
+				// Merge the stubs source jar into the snapshot zip so that when it is unpacked
+				// the source files are also unpacked.
+				snapshotRelativeDir := filepath.Join(scopeDir, ctx.Name()+"_stub_sources")
+				ctx.SnapshotBuilder().UnzipToSnapshot(properties.StubsSrcJar, snapshotRelativeDir)
+				scopeSet.AddProperty("stub_srcs", []string{snapshotRelativeDir})
+			}
 
 			if properties.CurrentApiFile != nil {
 				currentApiSnapshotPath := filepath.Join(scopeDir, ctx.Name()+".txt")
